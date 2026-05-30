@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data directories (large, not for version control)
+archive/
+scan/
+snapshot/
+summary/
+plot/
+test/
+test_50pC/
+STCAV_data/
+XTCAV_data/
+impact_particles/
+benchmark_with_Litrack/
+example/
+example1/
+example2/
+example_lcls/
+
+# Large data files
+*.h5
+*.hdf5
+particles.h5

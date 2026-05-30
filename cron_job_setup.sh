@@ -29,17 +29,17 @@ export EPICS_CA_SERVER_PORT="5068"
 export EPICS_TS_NTP_INET="134.79.48.11"
 export EPICS_IOC_LOG_INET="134.79.151.21"
 
-conda activate lume-live-dev
+conda activate lume-eblt-dev
 
 #These are S3DF Variables
 export LCLS_LATTICE=/sdf/group/ad/beamphysics/lcls-lattice
-export SCRATCH=/sdf/group/ad/beamphysics/jytang/lume-impact-live-demo/SCRATCH3
-export LUME_IMPACT_CODEBASE_LOCATION=/sdf/group/ad/beamphysics/jytang/lume-impact-live-demo
+#export SCRATCH=/sdf/group/ad/beamphysics/jytang/lume-impact-live-demo/SCRATCH3
+#export LUME_BELT_CODEBASE_LOCATION=/sdf/group/ad/beamphysics/jytang/lume-impact-live-demo
 
-cd $LUME_IMPACT_CODEBASE_LOCATION
-export LUME_OUTPUT_FOLDERS=/sdf/data/ad/ard/u/jytang/lume-impact-live/
-
-
+#cd $LUME_IMPACT_CODEBASE_LOCATION
+#export LUME_OUTPUT_FOLDERS=/sdf/data/ad/ard/u/jytang/lume-impact-live/
 
 
-ipython /sdf/group/ad/beamphysics/jytang/lume-impact-live-demo/lume-impact-live-demo2.py -- -t "s3df"
+
+
+ipython /sdf/data/ad/ard/u/jytang/lume-belt-live/lume-belt-live-demo.py

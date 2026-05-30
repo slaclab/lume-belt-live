@@ -114,8 +114,8 @@ def make_dashboard(belt_object=None,
                    itime=None,
                    outpath='test/',
                    file_id1=101,
-                   file_id2= 211,
-                   file_id3=213,
+                   file_id2= 109,
+                   file_id3=113,
                    file_id4 =201,
                    name='lume-belt-live'
                   ):
