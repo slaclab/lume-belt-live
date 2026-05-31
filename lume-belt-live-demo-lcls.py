@@ -252,6 +252,18 @@ def convertToDatedFormat(destionation_folder):
     
     return destionation_folder_dated
 
+def find_linac_info(E: BELT, ele_name: str):
+    c = 299_792_458.0
+    for ele in E.input.lattice_lines:
+        if ele.name == ele_name:
+            freq = ele.frequency
+            lamb = c/freq
+            V = ele.length*ele.gradient
+            phase_deg = ele.phase_deg
+            return lamb, V, phase_deg
+    print("element not found!")
+    return
+
 
 def my_belt_merit(E: BELT):
     """
@@ -282,8 +294,8 @@ def my_belt_merit(E: BELT):
     #-----------------------------------------------------------#
     #         for RF phase feed back                            #
     #-----------------------------------------------------------#
-    P_L1 = E.output.particle_distributions[109].to_particlegroup()
-    P_BC1 = E.output.particle_distributions[113].to_particlegroup()
+    P_L1 = E.output.particle_distributions[109].to_particlegroup() 
+    P_BC1 = E.output.particle_distributions[113].to_particlegroup() 
     P_L2 = E.output.particle_distributions[115].to_particlegroup()
     P_BC2 = E.output.particle_distributions[117].to_particlegroup()
 
@@ -292,31 +304,48 @@ def my_belt_merit(E: BELT):
     x = pg.z
     y = (pg.energy - pg['mean_energy'])/pg['mean_energy']
     chirp_L1,_  = np.polyfit(x, y, 1)
+    BC1_energy = pg['mean_energy']
 
     #beam chirp after L2
     pg = P_L2
     x = pg.z
     y = (pg.energy - pg['mean_energy'])/pg['mean_energy']
     chirp_L2,_  = np.polyfit(x, y, 1)
+    BC2_energy = pg['mean_energy']
 
     #bunch length after BC1
     BC1_sigma_t = P_BC1['sigma_t']
     BC1_bunch_length = BC1_sigma_t*np.sqrt(10)
     BC1_current = P_BC1.charge/BC1_bunch_length
+    
 
     #bunch length after BC2
     BC2_sigma_t = P_BC2['sigma_t']
     BC2_bunch_length = BC2_sigma_t*np.sqrt(12)
     BC2_current = P_BC2.charge/BC2_bunch_length
 
+    L1_lamb, L1_V, L1_phase_deg = find_linac_info(E, 'L1')
+    L2_lamb, L2_V, L2_phase_deg = find_linac_info(E, 'L2')
+
     m['L1_chirp'] = chirp_L1
     m['L2_chirp'] = chirp_L2
+    m['L1_lamb'] = L1_lamb
+    m['L2_lamb'] = L2_lamb
+    m['L1_V'] = L1_V
+    m['L2_V'] = L2_V
+    m['L1_phase_deg'] = L1_phase_deg
+    m['L2_phase_deg'] = L2_phase_deg
+    
+    
+    
     m['BC1_sigma_t'] = BC1_sigma_t
     m['BC1_bunch_length'] = BC1_bunch_length
     m['BC1_current'] = BC1_current
+    m['BC1_energy'] = BC1_energy
     m['BC2_sigma_t'] = BC2_sigma_t
     m['BC2_bunch_length'] = BC2_bunch_length
     m['BC2_current'] = BC2_current
+    m['BC2_energy'] = BC2_energy
     
 
 
@@ -373,7 +402,142 @@ def my_merit(belt_object, itime, prefix):
 
     return merit0
 
-def run1_lcls(input_beam = "./example_lcls/from_Litrack_250pC.h5", input_lattice = "example_lcls/belt.in"):
+
+def linac_phase_feedback_from_current(
+    h_sim,
+    R56,
+    I_sim,
+    I_meas,
+    V,
+    E,
+    lambda_rf,
+    phi_old,
+    gain_h=0.3,
+    max_step_deg=0.5,
+    min_current=1e-12,
+    A_min=0.02,
+    A_safe=0.05,
+    force_normal_side_near_full=True,
+):
+    """
+    One-step linac phase feedback with protection near full compression.
+
+    Convention:
+        R56 > 0
+        normal compression: A = 1 + R56*h > 0
+        over compression:  A = 1 + R56*h < 0
+        h < 0 for compression
+        phi < 0 for compression
+        h(phi) = (V*k_rf/E) * sin(phi)
+
+    If |A_sim| < A_min and force_normal_side_near_full=True,
+    the controller ignores current-error feedback and pushes the beam
+    toward a safe normal-compression point A_target = A_safe > 0.
+    """
+
+    if R56 <= 0:
+        raise ValueError("This function assumes R56 > 0.")
+
+    if A_safe <= 0:
+        raise ValueError("A_safe must be positive to force the normal-compression side.")
+
+    if A_min <= 0:
+        raise ValueError("A_min should be positive.")
+
+    I_sim = max(I_sim, min_current)
+    I_meas = max(I_meas, min_current)
+
+    A_sim = 1.0 + R56 * h_sim
+
+    if A_sim > 0:
+        compression_branch = "normal_compression"
+    elif A_sim < 0:
+        compression_branch = "over_compression"
+    else:
+        compression_branch = "full_compression"
+    print(compression_branch)
+    near_full_compression = abs(A_sim) < A_min
+
+    current_error_log = np.log(I_meas / I_sim)
+
+    if near_full_compression and force_normal_side_near_full:
+        print("near_full_compression")
+        # Explicitly choose the normal-compression side.
+        # This ignores current error because current cannot determine the branch near A=0.
+        A_target = A_safe
+        h_target = (A_target - 1.0) / R56
+
+        delta_h_full = h_target - h_sim
+        delta_h = gain_h * delta_h_full
+
+        feedback_mode = "force_normal_side"
+
+    else:
+        # Standard log-current feedback.
+        #
+        # d ln I / dh = -R56 / A
+        # delta_h = -A/R56 * ln(I_meas/I_sim)
+        delta_h = -gain_h * A_sim / R56 * current_error_log
+
+        h_target = h_sim + delta_h / max(gain_h, 1e-15)
+        A_target = 1.0 + R56 * h_target
+
+        feedback_mode = "log_current_feedback"
+
+    h_new_est = h_sim + delta_h
+    A_new_est = 1.0 + R56 * h_new_est
+
+    k_rf = 2.0 * np.pi / lambda_rf
+
+    # Your convention:
+    # h = (V*k_rf/E) * sin(phi)
+    dh_dphi = (V * k_rf / E) * np.cos(phi_old)
+
+    if abs(dh_dphi) < 1e-12:
+        raise ValueError("Phase-to-chirp sensitivity is too small.")
+
+    delta_phi_raw = delta_h / dh_dphi
+
+    max_step_rad = np.deg2rad(max_step_deg)
+    delta_phi_applied = np.clip(delta_phi_raw, -max_step_rad, max_step_rad)
+
+    phi_new = phi_old + delta_phi_applied
+
+    diagnostics = {
+        "feedback_mode": feedback_mode,
+        "h_sim": h_sim,
+        "R56": R56,
+        "A_sim": A_sim,
+        "A_target": A_target,
+        "A_new_est": A_new_est,
+        "h_target": h_target,
+        "h_new_est": h_new_est,
+        "compression_branch": compression_branch,
+        "near_full_compression": near_full_compression,
+        "A_min": A_min,
+        "A_safe": A_safe,
+        "I_sim": I_sim,
+        "I_meas": I_meas,
+        "current_error_log": current_error_log,
+        "current_ratio_Imeas_over_Isim": I_meas / I_sim,
+        "gain_h": gain_h,
+        "delta_h": delta_h,
+        "k_rf": k_rf,
+        "dh_dphi": dh_dphi,
+        "delta_phi_raw_rad": delta_phi_raw,
+        "delta_phi_raw_deg": np.rad2deg(delta_phi_raw),
+        "delta_phi_applied_rad": delta_phi_applied,
+        "delta_phi_applied_deg": np.rad2deg(delta_phi_applied),
+        "phi_old_rad": phi_old,
+        "phi_old_deg": np.rad2deg(phi_old),
+        "phi_new_rad": phi_new,
+        "phi_new_deg": np.rad2deg(phi_new),
+    }
+
+    return np.rad2deg(phi_new), diagnostics
+
+
+def run1_lcls(input_beam = "./example_lcls/from_Litrack_250pC.h5", input_lattice = "example_lcls/belt.in", force_normal_compression = True, Amin = 0.02):
     dat = {}
     prefix = 'lume-belt-live'
     SETTINGS0 = {"Impact_particles": input_beam}
@@ -388,7 +552,7 @@ def run1_lcls(input_beam = "./example_lcls/from_Litrack_250pC.h5", input_lattice
                                                            SETTINGS0,
                                                            snapshot_dir=SNAPSHOT_DIR_DATED,
                                                           snapshot_file=None)        
-    print(mysettings)
+    #print(mysettings)
     dat['isotime'] = itime
     
     # Record inputs
@@ -401,6 +565,7 @@ def run1_lcls(input_beam = "./example_lcls/from_Litrack_250pC.h5", input_lattice
     
     
     #-------Initial Run-------------------------------------------------
+    print("Initial Run")
     outputs = evaluate_belt(CONFIG0, mysettings,
                                        merit_f=lambda x: my_merit(x, itime, prefix),
                                        archive_path=ARCHIVE_DIR_DATED,
@@ -427,7 +592,7 @@ def run1_lcls(input_beam = "./example_lcls/from_Litrack_250pC.h5", input_lattice
     mysettings["BC1_Col:zmax"] = zmax
     
     
-    print(mysettings)
+    #print(mysettings)
     
     outputs = evaluate_belt(CONFIG0, mysettings,
                                        merit_f=lambda x: my_merit(x, itime, prefix),
@@ -446,23 +611,18 @@ def run1_lcls(input_beam = "./example_lcls/from_Litrack_250pC.h5", input_lattice
     Lb = 2.034970000e-01
 
     BC1_R56 = 2*BC1_angle**2*(Ldb + 2/3*Lb)
+    V = outputs['L1_V']
+    E = outputs['BC1_energy']
+    
     print("Third run, tune L1 phase to match BC1 current from ", BC1_current_sim, "A to ", BC1_current_live, "A")
-    print(f'BC1_R56 = {BC1_R56}')
+
+    count  = 0
     while np.abs(BC1_current_live - BC1_current_sim)/BC1_current_live > 0.1:
         
-        #calculate new L1 phase
-        #r = BC1_current_live/BC1_current_sim
-        #L1_new_chirp = ((1 - r) + BC1_R56*L1_chirp_sim)/(r*BC1_R56)
-        if BC1_R56*L1_chirp_sim + 1 < 0:
-            print("BC1 Overcompression")
-        L1_new_chirp = (BC1_current_sim/BC1_current_live*np.abs(1 + BC1_R56*L1_chirp_sim) - 1)/BC1_R56
-
-        
-        sin_L1_phase = L1_new_chirp/L1_chirp_sim*np.sin(mysettings['L1:phase_deg']/180*np.pi)
-        L1_new_phase = np.asin(sin_L1_phase)
-        L1_new_phase_deg = L1_new_phase/np.pi*180
+        L1_new_phase_deg, diagnostics = linac_phase_feedback_from_current(h_sim = L1_chirp_sim, R56 = BC1_R56, I_sim = BC1_current_sim, I_meas = BC1_current_live,V = V, E = E, lambda_rf = outputs['L1_lamb'], phi_old = np.radians(outputs['L1_phase_deg']), gain_h=0.4, max_step_deg=1.5, min_current=1e-12, A_min=Amin, A_safe = 0.05, force_normal_side_near_full=force_normal_compression)
         
         print("Change L1 phase from ", mysettings['L1:phase_deg'], "deg to", L1_new_phase_deg, "deg")
+        
     
 
         mysettings['EBC1:energy_increment'] += mysettings['L1_amplitude']*np.cos(mysettings['L1:phase_deg']/180*np.pi) - mysettings['L1_amplitude']*np.cos(L1_new_phase_deg/180*np.pi)
@@ -476,6 +636,8 @@ def run1_lcls(input_beam = "./example_lcls/from_Litrack_250pC.h5", input_lattice
         BC1_current_sim = outputs['BC1_current']
         L1_chirp_sim = outputs['L1_chirp']
 
+        print(f"The simulated BC1 current is {BC1_current_sim}")
+
     dat['outputs_run2'] =  outputs
     #-----Fourth run, tune L2 phase to match BC2 current----------------------------
     
@@ -488,23 +650,20 @@ def run1_lcls(input_beam = "./example_lcls/from_Litrack_250pC.h5", input_lattice
     Lb = 5.491250000E-01
 
     BC2_R56 = 2*BC2_angle**2*(Ldb + 2/3*Lb)
+    V = outputs['L2_V']
+    E = outputs['BC2_energy']
+    
     print("Fourth run, tune L2 phase to match BC2 current from ", BC2_current_sim, "A to ", BC2_current_live, "A")
 
-    
-    while np.abs(BC2_current_live - BC2_current_sim)/BC2_current_live > 0.15:
+
+    count = 0
+    while (np.abs(BC2_current_live - BC2_current_sim)/BC2_current_live > 0.15) and count < 6:
         
     #calculate new L2 phase
     #r = BC2_current_live/BC2_current_sim
     #L2_new_chirp = ((1 - r) + BC2_R56*L2_chirp_sim)/(r*BC2_R56)
 
-        if BC2_R56*L2_chirp_sim + 1 < 0:
-            print("BC2 Overcompression")
-        L2_new_chirp = (BC2_current_sim/BC2_current_live*np.abs(1 + BC2_R56*L2_chirp_sim) - 1)/BC2_R56
-        
-   
-        sin_L2_phase = L2_new_chirp/L2_chirp_sim*np.sin(mysettings['L2:phase_deg']/180*np.pi)
-        L2_new_phase = np.asin(sin_L2_phase)
-        L2_new_phase_deg = L2_new_phase/np.pi*180
+        L2_new_phase_deg, diagnostics = linac_phase_feedback_from_current(h_sim = L2_chirp_sim, R56 = BC2_R56, I_sim = BC2_current_sim, I_meas = BC2_current_live, V = V, E = E, lambda_rf = outputs['L2_lamb'], phi_old = np.radians(outputs['L2_phase_deg']), gain_h=0.6, max_step_deg=2.0, min_current=1e-12, A_min=Amin, A_safe = 0.05, force_normal_side_near_full=force_normal_compression)
         print("Change L2 phase from ", mysettings['L2:phase_deg'], "deg to", L2_new_phase_deg, "deg")
     
 
@@ -517,6 +676,9 @@ def run1_lcls(input_beam = "./example_lcls/from_Litrack_250pC.h5", input_lattice
                                         verbose=False )
         BC2_current_sim = outputs['BC2_current']
         L2_chirp_sim = outputs['L2_chirp']
+        print(f"The simulated BC2 current is {BC2_current_sim}")
+
+        count += 1
         
         
     dat['outputs'] =  outputs   
